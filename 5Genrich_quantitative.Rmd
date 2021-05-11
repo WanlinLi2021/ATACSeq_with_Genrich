@@ -1,0 +1,313 @@
+---
+title: "quantitative analysis_atac_Genrich workflow"
+author: 
+date: "28/04/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### reference: http://jydlgnsh.orchestra.cancerdatasci.org/file_show?path=%2Fusr%2Flocal%2Flib%2FR%2Fsite-library%2FQuantitativeChIPseqWorkshop%2Fdoc%2FQuantitative-ChIPseq-Workshop.html
+
+```{r pressure, echo=FALSE}
+library(DiffBind)
+library(GreyListChIP)
+library(csaw)
+```
+
+## 1. Making a samplesheet
+
+Peaks = c("macs3/541_callpeak_peaks.narrowPeak","macs3/542_callpeak_peaks.narrowPeak","macs3/543_callpeak_peaks.narrowPeak","macs3/544_callpeak_peaks.narrowPeak","macs3/545_callpeak_peaks.narrowPeak","macs3/546_callpeak_peaks.narrowPeak")
+
+c("macs3/541_callpeak_summits.bed","macs3/542_callpeak_summits.bed","macs3/543_callpeak_summits.bed","macs3/544_callpeak_summits.bed","macs3/545_callpeak_summits.bed","macs3/546_callpeak_summits.bed")
+
+```{r}
+df_samples <- data.frame(
+    SampleID=c("prog541_Genrich","prog542_Genrich","prog543_Genrich","trans544_Genrich","trans545_Genrich","trans546_Genrich"), 
+    Condition = c("progenitors_Genrich","progenitors_Genrich","progenitors_Genrich","transitory_Genrich","transitory_Genrich","transitory_Genrich"), 
+    Replicate= c(1,2,3,1,2,3),
+    bamReads = c("bamfiles/541_sorted.bam","bamfiles/542_sorted.bam","bamfiles/543_sorted.bam","bamfiles/544_sorted.bam","bamfiles/545_sorted.bam","bamfiles/546_sorted.bam"),
+    Peaks = c("results_Genrich/541_narrowPeak","results_Genrich/542_narrowPeak","results_Genrich/543_narrowPeak","results_Genrich/544_narrowPeak","results_Genrich/545_narrowPeak","results_Genrich/546_narrowPeak"),
+    PeakCaller = c("bed","bed","bed","bed","bed","bed")
+)
+
+df_samples
+```
+ 
+```{r}
+write.csv(df_samples,"our_samples_Genrich.csv", row.names = FALSE)
+```
+ 
+
+## 2. load the experiment into DiffBind either by supplying the original .csv file or using the loaded samples dataframe
+ 
+```{r}
+tam.peaks <- dba(sampleSheet=df_samples)
+```
+ 
+This creates a DiffBind object (a DBA object) we’ve called peaksForMacs, which can be examined:
+
+```{r}
+tam.peaks
+```
+
+This shows the metadata for the 6 samples, along with how many called peaks were included for each. After loading, overlapping peaks are merged; there are a total of 82236unique regions specified, with 30311 of them overlapping peaks called in at least two samples.
+
+## 3 Consensus peaks sets and counting reads
+
+**3.1 Consensus peak set**
+
+One straightforward way to determine the consensus peaks is to consider genomic intervals that are identified as peaks in one or more of the samples. It can be helpful to make a plot of how many peaks overlap in how many samples:
+
+```{r}
+olap.rate <- dba.overlap(tam.peaks, mode=DBA_OLAP_RATE)
+olap.rate
+```
+
+```{r}
+plot(olap.rate, xlab="Overlapping samples", ylab="Overlapping peaks", type="b")
+```
+
+This shows that there are 82236 total merged peaks, representing the union of all intervals. At the other extreme, there are  6671 peaks that overlap in all 6 samples, representing the intersection of all the samples.
+
+Which should we chose? Given the rigor of the underlying statistical analysis, we can choose a more inclusive consensus set. The default is to make the consensus peak set using peaks identified in at least two samples (30311).
+
+More complex schemes, such as forming a consensus peak set separately from the replicates for each condition and then taking the union of these, are also possible.
+
+The default consensus peak set, which includes merged peaks that overlap in at least two samples, can be retrieved:
+
+```{r}
+consensus.peaks <- dba.peakset(tam.peaks, bRetrieve=TRUE)
+consensus.peaks[,0]
+```
+
+**3.2 Counting overlapping reads**
+
+The next step is to form the binding matrix using the consensus peak and computing overlapping read counts for each peak in each sample, whether or not it was called as a peak in that sample.
+
+The function used to accomplish this is dba.count(): NB: This is a compute-intensive step that takes too long to run
+
+```{r}
+tam.counts <- dba.count(tam.peaks)
+```
+
+After counting the reads, the DBA object reflects the consensus peak set rather than the original peak data:
+
+```{r}
+tam.counts
+```
+
+Now all 6 samples have counts for all 28852 consensus sites. Two columns have been added to the display, showing the total number of aligned Reads in each .bamfile, and the Fraction of Reads in Peaks (FRiP) representing the proportion of reads that were counted as overlapping a consensus site.
+
+**Examining and normalizing the binding matrix**
+At this stage it is worth looking more closely at certain aspects of the binding matrix in preparation for normalization and modeling.
+
+### 3.3.1 Plots to look for a batch effect
+
+Of particular interest is the presence of technical effects in the experiment, such as batch effects.
+
+We can look at how the samples cluster using heatmaps and PCA plots. A correlation heatmap (in which correlations values between each pair of columns in the binding matrix is calculated) can be shown using dba.plotHeatmap(), which is also the default plot:
+
+```{r}
+plot(tam.counts)
+```
+
+This shows a very high correlation between the replicate for each sample type
+
+We can verify that there is no obvious batch effect with a PCA plot:
+
+```{r}
+dba.plotPCA(tam.counts,DBA_REPLICATE, label=DBA_CONDITION,labelSize=0.6)
+```
+
+### 3.3.2Normalization (default)
+we will use the default normalization in DiffBind, which makes minimal assumptions about the data and seeks to “do no harm”.
+
+First let’s make an MA plot of the data before normalization. An MA plot shows how the fold changes between conditions are distributed as the mean concentration of reads counts increases. For this plot, we’ll use the samples in the Responsive condition as the baseline, and see how the samples in the transitory_Genrich condition compare.
+
+```{r}
+dba.plotMA(tam.counts, bNormalized=FALSE, sub="Non-Normalized",
+           contrast=list(progenitors_macs=tam.counts$masks$progenitors_Genrich,
+                         transitory_macs=tam.counts$masks$transitory_Genrich))
+```
+
+In this plot, each of the consensus site is a point (smoothed), while the the X-axis orders them according to the mean number of
+overlapping read counts for the consensus site, and the Y-axis shows the log2 fold change. Points above the 0-fold line (blue) demonstrate greater enrichment of reads in the progenitors_Genrich condition, while point below the 0-fold line are more enriched in the transitory_Genrich condition. The red curve is a loess fit showing the overall trend in the data.
+
+This plots shows that in the raw data, the transitory_macs condition samples have overall higher concentration of overlapping reads in consensus peaks. This could either be a technical bias, or an indication that there is a loss of ER binding in the tamoxifen resistant condition.
+
+By default, DiffBind normalizes only using the full library sizes of the samples (total aligned reads in the .bam). Perform a default normalization and see how the plot changes:
+
+```{r}
+dba.plotMA(tam.counts, sub="Normalized (Default)",
+           contrast=list(progenitors_macs=tam.counts$masks$progenitors_Genrich,
+                         transitory_macs=tam.counts$masks$transitory_Genrich))
+```
+
+We will consider normalization in more depth after modeling the data, as it is useful to consider the impact of normalization on the modeling results.
+
+## 4 Modeling and testing
+
+The core differential analysis in DiffBind is performed by one or more underlying read count modeling Bioconductor packages. The default package is DESeq2 (Love, Huber, and Anders 2014); the edgeR package (Robinson, McCarthy, and Smyth 2010) may be also used either as an alternative or in parallel. These packages, developed for modeling RNA-seq read counts, enable GLMs to be fit.
+
+### 4.1 Default model
+
+The DiffBind function dba.contrast() is used to specify the model and establish contrasts to be tested against the model. A default model and contrasts(s) can easily be established (note we explicitly specify that the baseline Condition should be transitory_macs):
+
+```{r}
+tam.model <- dba.contrast(tam.counts,
+                          reorderMeta=list(Condition="transitory_Genrich"))
+```
+
+```{r}
+tam.model
+```
+
+The default model is based on observing that there is only one metadata field, Condition, that has a) multiple values and b) at least three samples having each value. A design formula is established using this factor and a contrast comparing progenitors_Genrich samples against the transitory_Genrich samples, with three samples in the progenitors_Genrich condition and three samples in the transitory_Genrich condition.
+
+### 4.2 Fitting and testing
+
+With the design formula in place, and a contrast established, the model can be fit with DESeq2 and tests applied for the contrast:
+
+```{r}
+tam.model <- dba.analyze(tam.model)
+```
+
+```{r}
+dba.show(tam.model,bContrasts=TRUE)
+```
+At the default threshold of FDR < 0.05, some 1261 sites are identified as being differentially bound.
+
+## 5 Examining analysis results
+
+After conducting an analysis, the results can be examined in a number of ways, including obtaining a report with the differential sites, as well as some useful plots.
+
+### 5.1 Reporting: obtaining differential sites
+
+The differential sites may be retrieved as a GRanges object:
+
+```{r}
+tam.db <- dba.report(tam.model)
+tam.db
+```
+
+For each site, the genomic interval is reported, as well as the key statistics:
+
+Conc: Mean concentration of (normalized) reads across all samples, reported as a log2 value.
+Conc_Resistant: Mean concentration of (normalized) reads across the Resistant samples, reported as a log2 value.
+Conc_progenitors_macs: Mean concentration of (normalized) reads across the progenitors_macs samples, reported as a log2 value.
+Fold: Log2 Fold Change, as computed by DESeq2.
+p-value: p-value for the comparison, as computed by DESeq2.
+FDR: multiple-testing corrected significance value for the comparison, as computed by DESeq2.
+
+We can look at the balance between Gain and Loss sites:
+
+```{r}
+sum(tam.db$Fold>0)
+```
+
+```{r}
+sum(tam.db$Fold<0)
+```
+
+#### The report object can now be used for downstream analysis, such as motif analysis, annotation to genomic features, etc.
+
+```{r}
+genes_df = as(tam.db, "data.frame")
+```
+
+```{r}
+genes_df <- cbind(PeakID = rownames(genes_df), genes_df)
+rownames(genes_df) <- 1:nrow(genes_df)
+```
+
+```{r}
+names(genes_df)[2]<-paste("chromosome")
+```
+
+
+```{r}
+genes_df
+```
+
+```{r}
+genes_df$chromosome = paste0('chr',genes_df$chromosome)
+
+genes_df
+```
+
+
+```{r}
+write.table(genes_df, file = "report_diff_Genrich.csv",sep="\t",col.names=TRUE, row.names=FALSE, quote=FALSE)
+```
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+genes_df %>% select(2,3,4,1,5,6)
+```
+
+
+```{r}
+genes_df_forHomer <- genes_df %>% select(2,3,4,1,5,6)
+genes_df_forHomer
+```
+
+```{r}
+write.table(genes_df_forHomer, file = "diff_Genrich_forHomer.bed",sep="\t",col.names=FALSE, row.names=FALSE, quote=FALSE)
+```
+
+
+### 5.2 Plotting: MA plot 
+
+```{r}
+dba.plotMA(tam.model)
+```
+
+### 5.3 Plotting: Volcano plot
+
+Similar to an MA plot, a volcano plot shows the log fold change (on the X-axis instead of the Y-axis), compared to the inverse of the FDR on the Y-axis, to show how FDR and LFC are related:
+
+```{r}
+dba.plotVolcano(tam.model)
+```
+
+### 5.4 Plotting: Clustering correlation heatmap
+
+We can also re-visit the clustering plots we originally did on the full binding matrix, except this time only taking differential sites into consideration:
+
+
+```{r}
+plot(tam.model, contrast=1)
+```
+
+As we would hope, the differential sites separate the samples into two clusters, one progenitors_macs and one transitory_macs.
+
+### 5.5 Plotting: PCA plot
+
+```{r}
+dba.plotPCA(tam.model, contrast=1, label=DBA_CONDITION,labelSize=0.6)
+```
+
+### 5.6 Plotting: Read concentration heatmap
+
+In addition to the correlation heatmap, a plot showing the read concentrations can also be generated. In this case we scale the read concentrations for each site, to emphasize the difference between the lowest and highest values:
+
+```{r}
+hmap <- colorRampPalette(c("red", "black", "green"))(n = 13)
+readscores <- dba.plotHeatmap(tam.model, contrast=1, correlations=FALSE,
+                              scale="row", colScheme = hmap)
+```
+
+```{r}
+sessionInfo()
+```
+
+
+
+
